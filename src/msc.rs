@@ -11,8 +11,8 @@ use pico_autofill::text::AutofillText;
 use portable_atomic::Ordering;
 
 use crate::{
-    FLASH_DATA_OFFSET, FLASH_SECTOR_SIZE, KEYBOARD_COMMANDS, KeyboardCommand, MEDIA_PRESENT,
-    RESET_REQUEST, STORAGE_COMMAND, StorageCommand,
+    CURRENT_TEXT, FLASH_DATA_OFFSET, FLASH_SECTOR_SIZE, MEDIA_PRESENT, RESET_REQUEST,
+    STORAGE_COMMAND, StorageCommand, TYPE_REQUESTS,
 };
 
 const MSC_CLASS: u8 = 0x08;
@@ -145,7 +145,7 @@ impl<'d, D: Driver<'d>> MscClass<'d, D> {
                 if saved {
                     format_disk(disk, current_text);
                 }
-                KEYBOARD_COMMANDS.send(KeyboardCommand::TypeText).await;
+                TYPE_REQUESTS.send(()).await;
             }
         }
     }
@@ -600,9 +600,7 @@ async fn commit_disk(
         && flash.blocking_write(FLASH_DATA_OFFSET, &record).is_ok();
 
     *current_text = updated.clone();
-    KEYBOARD_COMMANDS
-        .send(KeyboardCommand::Replace(updated))
-        .await;
+    CURRENT_TEXT.lock(|text| *text.borrow_mut() = updated);
     if saved {
         *dirty = false;
     }

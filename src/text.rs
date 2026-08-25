@@ -1,9 +1,10 @@
-pub const MAX_TEXT_LEN: usize = 50;
+pub const MAX_TEXT_LEN: usize = 2_500;
+const _: () = assert!(MAX_TEXT_LEN <= u16::MAX as usize);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AutofillText {
     bytes: [u8; MAX_TEXT_LEN],
-    len: u8,
+    len: u16,
 }
 
 impl AutofillText {
@@ -67,10 +68,9 @@ mod tests {
     }
 
     #[test]
-    fn text_should_truncate_at_fifty_printable_ascii_bytes() {
-        let text = AutofillText::from_file_bytes(
-            b"12345678901234567890123456789012345678901234567890EXTRA",
-        );
+    fn text_should_truncate_at_configured_limit() {
+        let input = [b'x'; MAX_TEXT_LEN + 1];
+        let text = AutofillText::from_file_bytes(&input);
         assert_eq!(text.len(), MAX_TEXT_LEN);
     }
 

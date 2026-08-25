@@ -11,9 +11,11 @@ Embassy/Rust firmware for a standard Raspberry Pi Pico (RP2040, no wireless hard
 - Eject, synchronize-cache, or the first single click after unmount commits changed text to the Pico's final 4 KiB flash sector.
 - The click input uses 30 ms debounce. A possible single click is delayed until it cannot be the beginning of a triple click, so a triple click never types text.
 
-`AUTOFILL.TXT` is limited to the first 50 printable US-ASCII characters. A trailing CR/LF is removed, unsupported bytes are dropped, and excess text is truncated. The USB keyboard mapping assumes a US keyboard layout.
+`AUTOFILL.TXT` is limited to the first 2,500 printable US-ASCII characters. A trailing CR/LF is removed, unsupported bytes are dropped, and excess text is truncated. The USB keyboard mapping assumes a US keyboard layout.
 
 The flash record has a version marker and CRC. Invalid or erased flash loads as an empty value. The linker script reserves `0x001ff000..0x001fffff`, preventing firmware from overlapping that record.
+
+The keyboard endpoint uses the fastest USB full-speed polling interval: 1 ms. Different consecutive physical keys use one report each, so the best-case rate is about 1 ms per character (about 2.5 seconds for 2,500 characters). Repeating the same physical key requires an extra release report and takes about 2 ms for that character. Actual timing still depends on the host's USB scheduling.
 
 ## Build and flash
 
@@ -37,7 +39,7 @@ Hold `BOOTSEL` while plugging in the Pico, then copy `pico-autofill.uf2` to the 
 
 1. Plug in the flashed Pico normally.
 2. Triple-click `BOOTSEL`. The host may need a second or two to notice the newly inserted medium.
-3. Open `AUTOFILL.TXT`, replace its contents with one line of up to 50 printable ASCII characters, and save.
+3. Open `AUTOFILL.TXT`, replace its contents with up to 2,500 printable ASCII characters, and save.
 4. Eject or unmount `PICO FILL`.
 5. Focus the destination field and single-click `BOOTSEL`.
 
@@ -59,4 +61,3 @@ The value is plaintext in flash and is intentionally emitted as keyboard input. 
 Flash is erased only when the mounted filesystem changed and the host syncs/ejects (or you click after unmount). Avoid continuously rewriting the file if flash endurance matters.
 
 The example USB VID/PID is `1209:2040`; obtain and substitute identifiers appropriate for any distributed product.
-

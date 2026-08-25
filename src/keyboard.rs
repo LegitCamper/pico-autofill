@@ -1,5 +1,9 @@
 pub const LEFT_SHIFT: u8 = 0x02;
 
+pub fn needs_intermediate_release(previous_keycode: Option<u8>, next_keycode: u8) -> bool {
+    previous_keycode == Some(next_keycode)
+}
+
 pub fn ascii_to_hid(byte: u8) -> Option<(u8, u8)> {
     let result = match byte {
         b'a'..=b'z' => (0, 4 + byte - b'a'),
@@ -58,5 +62,20 @@ mod tests {
     fn punctuation_should_include_shift_modifier() {
         assert_eq!(ascii_to_hid(b'?'), Some((LEFT_SHIFT, 56)));
         assert_eq!(ascii_to_hid(b'/'), Some((0, 56)));
+    }
+
+    #[test]
+    fn different_keycodes_should_not_need_intermediate_release() {
+        assert!(!needs_intermediate_release(Some(4), 5));
+    }
+
+    #[test]
+    fn repeated_keycode_should_need_intermediate_release() {
+        assert!(needs_intermediate_release(Some(4), 4));
+    }
+
+    #[test]
+    fn first_keycode_should_not_need_intermediate_release() {
+        assert!(!needs_intermediate_release(None, 4));
     }
 }

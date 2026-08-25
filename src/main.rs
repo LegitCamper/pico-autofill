@@ -3,6 +3,8 @@
 
 mod msc;
 
+use core::cell::RefCell;
+
 use embassy_executor::Spawner;
 use embassy_futures::join::join4;
 use embassy_rp::bind_interrupts;
@@ -10,7 +12,7 @@ use embassy_rp::bootsel::is_bootsel_pressed;
 use embassy_rp::flash::{Blocking, Flash};
 use embassy_rp::peripherals::{BOOTSEL, USB};
 use embassy_rp::usb::{Driver, InterruptHandler};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embassy_time::{Instant, Timer};
@@ -24,7 +26,7 @@ use embassy_usb::{Builder, Config};
 use panic_halt as _;
 use pico_autofill::click::{ClickAction, ClickDetector};
 use pico_autofill::fat::{DISK_BYTES, format_disk};
-use pico_autofill::keyboard::ascii_to_hid;
+use pico_autofill::keyboard::{ascii_to_hid, needs_intermediate_release};
 use pico_autofill::persist::{self, FLASH_RECORD_SIZE};
 use pico_autofill::text::AutofillText;
 use portable_atomic::{AtomicBool, AtomicU8, Ordering};
@@ -35,24 +37,21 @@ use crate::msc::{MscClass, MscControl};
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
 pub(crate) const FLASH_DATA_OFFSET: u32 = 0x001f_f000;
 pub(crate) const FLASH_SECTOR_SIZE: u32 = 4096;
+const _: () = assert!(FLASH_RECORD_SIZE <= FLASH_SECTOR_SIZE as usize);
 
 pub(crate) static MEDIA_PRESENT: AtomicBool = AtomicBool::new(false);
 pub(crate) static RESET_REQUEST: AtomicBool = AtomicBool::new(false);
 static HID_PROTOCOL: AtomicU8 = AtomicU8::new(HidProtocolMode::Report as u8);
 
 pub(crate) static STORAGE_COMMAND: Signal<CriticalSectionRawMutex, StorageCommand> = Signal::new();
-pub(crate) static KEYBOARD_COMMANDS: Channel<CriticalSectionRawMutex, KeyboardCommand, 4> =
-    Channel::new();
+pub(crate) static TYPE_REQUESTS: Channel<CriticalSectionRawMutex, (), 2> = Channel::new();
+pub(crate) static CURRENT_TEXT: Mutex<CriticalSectionRawMutex, RefCell<AutofillText>> =
+    Mutex::new(RefCell::new(AutofillText::empty()));
 
 #[derive(Clone, Copy)]
 pub(crate) enum StorageCommand {
     Insert,
     EjectAndType,
-}
-
-pub(crate) enum KeyboardCommand {
-    Replace(AutofillText),
-    TypeText,
 }
 
 bind_interrupts!(struct Irqs {
@@ -65,6 +64,7 @@ async fn main(_spawner: Spawner) {
 
     let mut flash = Flash::<_, Blocking, FLASH_SIZE>::new_blocking(p.FLASH);
     let current_text = load_saved_text(&mut flash);
+    CURRENT_TEXT.lock(|text| *text.borrow_mut() = current_text.clone());
     let mut disk = [0_u8; DISK_BYTES];
     format_disk(&mut disk, &current_text);
 
@@ -94,7 +94,7 @@ async fn main(_spawner: Spawner) {
     let hid_config = HidConfig {
         report_descriptor: KeyboardReport::desc(),
         request_handler: Some(&mut hid_handler),
-        poll_ms: 10,
+        poll_ms: 1,
         max_packet_size: 8,
         hid_subclass: HidSubclass::Boot,
         hid_boot_protocol: HidBootProtocol::Keyboard,
@@ -104,10 +104,9 @@ async fn main(_spawner: Spawner) {
     let msc = MscClass::new(&mut builder, &mut msc_control);
     let mut usb = builder.build();
 
-    let keyboard_text = current_text.clone();
     join4(
         usb.run(),
-        keyboard_loop(hid_writer, keyboard_text),
+        keyboard_loop(hid_writer),
         button_loop(p.BOOTSEL),
         msc.run(&mut disk, &mut flash, current_text),
     )
@@ -144,31 +143,30 @@ async fn button_loop(mut bootsel: embassy_rp::Peri<'static, BOOTSEL>) -> ! {
                 if MEDIA_PRESENT.load(Ordering::Acquire) {
                     STORAGE_COMMAND.signal(StorageCommand::EjectAndType);
                 } else {
-                    KEYBOARD_COMMANDS.send(KeyboardCommand::TypeText).await;
+                    TYPE_REQUESTS.send(()).await;
                 }
             }
         }
     }
 }
 
-async fn keyboard_loop<'d, D: UsbDriver<'d>>(
-    mut writer: HidWriter<'d, D, 8>,
-    mut current_text: AutofillText,
-) -> ! {
+async fn keyboard_loop<'d, D: UsbDriver<'d>>(mut writer: HidWriter<'d, D, 8>) -> ! {
     loop {
-        match KEYBOARD_COMMANDS.receive().await {
-            KeyboardCommand::Replace(text) => current_text = text,
-            KeyboardCommand::TypeText => {
-                for &byte in current_text.as_bytes() {
-                    let Some((modifier, keycode)) = ascii_to_hid(byte) else {
-                        continue;
-                    };
-                    write_report(&mut writer, [modifier, 0, keycode, 0, 0, 0, 0, 0]).await;
-                    Timer::after_millis(8).await;
-                    write_report(&mut writer, [0; 8]).await;
-                    Timer::after_millis(8).await;
-                }
+        TYPE_REQUESTS.receive().await;
+        let current_text = CURRENT_TEXT.lock(|text| text.borrow().clone());
+        let mut previous_keycode = None;
+        for &byte in current_text.as_bytes() {
+            let Some((modifier, keycode)) = ascii_to_hid(byte) else {
+                continue;
+            };
+            if needs_intermediate_release(previous_keycode, keycode) {
+                write_report(&mut writer, [0; 8]).await;
             }
+            write_report(&mut writer, [modifier, 0, keycode, 0, 0, 0, 0, 0]).await;
+            previous_keycode = Some(keycode);
+        }
+        if previous_keycode.is_some() {
+            write_report(&mut writer, [0; 8]).await;
         }
     }
 }

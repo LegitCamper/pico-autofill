@@ -12,6 +12,7 @@ const DATA_START_SECTOR: usize = ROOT_DIR_SECTOR + ROOT_DIR_SECTORS;
 const ROOT_ENTRY_COUNT: u16 = 32;
 const FILE_NAME: &[u8; 11] = b"AUTOFILLTXT";
 const VOLUME_LABEL: &[u8; 11] = b"PICO FILL  ";
+const _: () = assert!(MAX_TEXT_LEN <= (SECTOR_COUNT - DATA_START_SECTOR) * SECTOR_SIZE);
 
 pub fn format_disk(disk: &mut [u8; DISK_BYTES], text: &AutofillText) {
     disk.fill(0);
@@ -22,7 +23,16 @@ pub fn format_disk(disk: &mut [u8; DISK_BYTES], text: &AutofillText) {
     disk[fat_1] = 0xf8;
     disk[fat_1 + 1] = 0xff;
     disk[fat_1 + 2] = 0xff;
-    set_fat12_entry(&mut disk[fat_1..fat_1 + SECTOR_SIZE], 2, 0x0fff);
+    let cluster_count = text.len().div_ceil(SECTOR_SIZE);
+    for cluster_index in 0..cluster_count {
+        let cluster = 2 + cluster_index as u16;
+        let next = if cluster_index + 1 == cluster_count {
+            0x0fff
+        } else {
+            cluster + 1
+        };
+        set_fat12_entry(&mut disk[fat_1..fat_1 + SECTOR_SIZE], cluster, next);
+    }
     let (before_fat_2, at_fat_2) = disk.split_at_mut(fat_2);
     at_fat_2[..SECTOR_SIZE].copy_from_slice(&before_fat_2[fat_1..fat_1 + SECTOR_SIZE]);
 
@@ -33,7 +43,8 @@ pub fn format_disk(disk: &mut [u8; DISK_BYTES], text: &AutofillText) {
     let file_entry = root + 32;
     disk[file_entry..file_entry + 11].copy_from_slice(FILE_NAME);
     disk[file_entry + 11] = 0x20;
-    disk[file_entry + 26..file_entry + 28].copy_from_slice(&2_u16.to_le_bytes());
+    let first_cluster = if text.is_empty() { 0_u16 } else { 2_u16 };
+    disk[file_entry + 26..file_entry + 28].copy_from_slice(&first_cluster.to_le_bytes());
     disk[file_entry + 28..file_entry + 32].copy_from_slice(&(text.len() as u32).to_le_bytes());
 
     let data = DATA_START_SECTOR * SECTOR_SIZE;
@@ -137,6 +148,15 @@ mod tests {
     #[test]
     fn formatted_disk_should_round_trip_text() {
         let expected = AutofillText::from_file_bytes(b"abc123!@#");
+        let mut disk = [0_u8; DISK_BYTES];
+        format_disk(&mut disk, &expected);
+        assert_eq!(extract_text(&disk), Some(expected));
+    }
+
+    #[test]
+    fn formatted_disk_should_round_trip_full_capacity_across_clusters() {
+        let input = [b'x'; MAX_TEXT_LEN];
+        let expected = AutofillText::from_file_bytes(&input);
         let mut disk = [0_u8; DISK_BYTES];
         format_disk(&mut disk, &expected);
         assert_eq!(extract_text(&disk), Some(expected));
